@@ -403,6 +403,77 @@ function geminiToOpenAIResponse(body: Json, model: string): Json {
   };
 }
 
+/** Anthropic Messages request -> OpenAI Chat Completions request (stream forced off). */
+function anthropicToOpenAIRequest(body: Json, model: string): Json {
+  const messages: Json[] = [];
+  if (typeof body.system === 'string' && body.system !== '') messages.push({ role: 'system', content: body.system });
+  else if (Array.isArray(body.system)) {
+    const text = body.system.flatMap((b) => (isRecord(b) && b.type === 'text' && typeof b.text === 'string' ? [b.text] : [])).join('\n');
+    if (text !== '') messages.push({ role: 'system', content: text });
+  }
+  for (const raw of Array.isArray(body.messages) ? body.messages : []) {
+    if (!isRecord(raw)) continue;
+    const role = raw.role === 'assistant' ? 'assistant' : 'user';
+    const content = raw.content;
+    if (typeof content === 'string') {
+      messages.push({ role, content });
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+    if (role === 'assistant') {
+      const blocks: Json[] = [];
+      const text = textOf(content);
+      if (text !== '') blocks.push(text);
+      const calls: Json[] = [];
+      for (const block of content) {
+        if (isRecord(block) && block.type === 'tool_use') {
+          calls.push({ id: typeof block.id === 'string' ? block.id : 'toolu_0', type: 'function', function: { name: String(block.name ?? ''), arguments: JSON.stringify(isRecord(block.input) ? block.input : {}) } });
+        }
+      }
+      const msg: Json = { role: 'assistant', content: text !== '' ? text : null };
+      if (calls.length > 0) msg.tool_calls = calls;
+      messages.push(msg);
+      continue;
+    }
+    // user-side content blocks
+    const hasToolResult = content.some((b) => isRecord(b) && b.type === 'tool_result');
+    if (hasToolResult) {
+      for (const block of content) {
+        if (!isRecord(block) || block.type !== 'tool_result') continue;
+        messages.push({ role: 'tool', tool_call_id: String(block.tool_use_id ?? ''), content: textOf(block.content) });
+      }
+      continue;
+    }
+    const parts: Json[] = [];
+    for (const block of content) {
+      if (!isRecord(block)) continue;
+      if (block.type === 'text' && typeof block.text === 'string') parts.push({ type: 'text', text: block.text });
+      else if (block.type === 'image' && isRecord(block.source)) {
+        const src = block.source;
+        if (src.type === 'base64' && typeof src.data === 'string') parts.push({ type: 'image_url', image_url: { url: `data:${String(src.media_type ?? 'image/png')};base64,${src.data}` } });
+        else if (src.type === 'url' && typeof src.url === 'string') parts.push({ type: 'image_url', image_url: { url: src.url } });
+      }
+    }
+    if (parts.length > 0) messages.push({ role: 'user', content: parts });
+  }
+  const out: Json = { model, messages, max_tokens: typeof body.max_tokens === 'number' ? body.max_tokens : 1024, stream: false };
+  if (typeof body.temperature === 'number') out.temperature = body.temperature;
+  if (typeof body.top_p === 'number') out.top_p = body.top_p;
+  if (Array.isArray(body.stop_sequences) && body.stop_sequences.length > 0) out.stop = body.stop_sequences;
+  if (Array.isArray(body.tools)) {
+    const tools = body.tools.flatMap((raw) => {
+      if (!isRecord(raw) || typeof raw.name !== 'string') return [];
+      return [{ type: 'function', function: { name: raw.name, description: typeof raw.description === 'string' ? raw.description : '', parameters: isRecord(raw.input_schema) ? raw.input_schema : { type: 'object', properties: {} } } }];
+    });
+    if (tools.length > 0) out.tools = tools;
+  }
+  const choice = body.tool_choice;
+  if (isRecord(choice) && choice.type === 'tool' && typeof choice.name === 'string') out.tool_choice = { type: 'function', function: { name: choice.name } };
+  else if (isRecord(choice) && choice.type === 'any') out.tool_choice = 'required';
+  else if (choice === 'auto' || choice === undefined) out.tool_choice = 'auto';
+  return out;
+}
+
 async function callUpstream(cand: Cand, clientWire: 'openai' | 'anthropic', body: Json): Promise<Response> {
   const base = joinBase(ENV_URL, cand.probe.provider.base);
   const wire = cand.probe.provider.wire;
@@ -411,7 +482,7 @@ async function callUpstream(cand: Cand, clientWire: 'openai' | 'anthropic', body
   let payload: Json;
   if (wire === 'openai') {
     url = `${base}/v1/chat/completions`;
-    payload = { ...body, model: cand.model.id, stream: false };
+    payload = clientWire === 'openai' ? { ...body, model: cand.model.id, stream: false } : anthropicToOpenAIRequest(body, cand.model.id);
   } else if (wire === 'anthropic') {
     url = `${base}/v1/messages`;
     headers['anthropic-version'] = '2023-06-01';

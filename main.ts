@@ -1,7 +1,7 @@
-// free-model-aggregator-01 entry: one server, two client wires, ten free providers.
-// Quality-ranked routing with runtime budget/failure tracking and failover; anthropic-wire upstream (zai)
-// supported for both client wires; every upstream call is made non-streaming and the client's stream is
-// synthesized, so the wire output is fully deterministic.
+// free-model-aggregator-01 entry v2: one server, two client wires, ten free providers.
+// Quality-ranked routing with runtime budget/failure tracking and failover; openai, anthropic and gemini
+// upstream wires all supported; every upstream call is made non-streaming and the client's stream is
+// synthesized, so the wire output is fully deterministic (no wall clock, no unseeded randomness).
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import {
   authHeaders,
@@ -23,7 +23,7 @@ import {
 } from './lib/providers.ts';
 
 const PROTOCOL_VERSION = 1;
-const POLL_INTERVAL_MS = 100;
+const POLL_INTERVAL_MS = 80;
 const PROBE_TIMEOUT_MS = 5000;
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 const FIXED_CREATED = 1767225600;
@@ -36,7 +36,7 @@ let probes: Probe[] = [];
 let catalog: CatalogReport = { providers: [] };
 let manifestIndex = 0;
 
-/** Per-provider runtime health: calls made and refusals seen. dead after 2 refusals (budget or outage). */
+/** Per-provider runtime health: calls made and refusals seen. A 402, or many 429s, marks it dead. */
 const health = new Map<string, { calls: number; fails: number; dead: boolean }>();
 function healthOf(id: string): { calls: number; fails: number; dead: boolean } {
   let h = health.get(id);
